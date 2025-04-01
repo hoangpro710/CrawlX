@@ -1,4 +1,4 @@
-from utils.archive_scraper import archive_and_save_content
+from utils.archive_scraper import get_archived_url
 import argparse
 import sys
 import logging
@@ -11,13 +11,11 @@ def main():
     example_url = "https://pub.towardsai.net/gemma-3-mistralocr-rag-just-revolutionized-agent-ocr-forever-e69d1f2a67e5"
     
     parser = argparse.ArgumentParser(
-        description='Archive webpage content using archive.ph',
+        description='Get archived URL from archive.ph',
         epilog=f'Example: python main.py "{example_url}"'
     )
     parser.add_argument('url', nargs='?', default=example_url,
-                       help='URL to archive and extract content from (default: Towards AI article)')
-    parser.add_argument('--output-dir', '-o', default='archived_content',
-                       help='Directory to save the output (default: archived_content)')
+                       help='URL to archive (default: Towards AI article)')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Enable verbose debug output')
     
@@ -31,11 +29,9 @@ def main():
     )
     
     try:
-        logging.info(f"Starting archive process for: {args.url}")
-        md_file, html_file = archive_and_save_content(args.url, args.output_dir)
-        print("\nArchive completed successfully!")
-        print(f"Markdown content saved to: {md_file}")
-        print(f"HTML content saved to: {html_file}")
+        logging.info(f"Getting archived URL for: {args.url}")
+        archived_url = get_archived_url(args.url)
+        print(archived_url)
     except Exception as e:
         logging.error(f"Error during archiving: {str(e)}")
         sys.exit(1)

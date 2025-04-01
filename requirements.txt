@@ -1,2 +1,2 @@
-hrequests[all]
-selectolax
+selectolax>=0.3.0
+hrequests>=0.1.0
