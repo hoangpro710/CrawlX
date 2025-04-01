@@ -4,9 +4,23 @@ import logging
 import asyncio
 from utils.email_checker import EmailChecker
 
+async def async_main(args):
+    """
+    Async main function to run the email checker
+    """
+    try:
+        logging.info("Starting Medium email checker...")
+        checker = EmailChecker()
+        await checker.run(check_interval=args.interval)
+    except KeyboardInterrupt:
+        logging.info("Shutting down gracefully...")
+    except Exception as e:
+        logging.error(f"Error during execution: {str(e)}")
+        raise
+
 def main():
     """
-    Main function to run the email checker
+    Main function to handle command line arguments and run the async main
     """
     parser = argparse.ArgumentParser(
         description='Check for Medium emails and archive articles',
@@ -27,9 +41,8 @@ def main():
     )
     
     try:
-        logging.info("Starting Medium email checker...")
-        checker = EmailChecker()
-        asyncio.run(checker.run(check_interval=args.interval))
+        # Run the async main function
+        asyncio.run(async_main(args))
     except KeyboardInterrupt:
         logging.info("Shutting down gracefully...")
         sys.exit(0)
