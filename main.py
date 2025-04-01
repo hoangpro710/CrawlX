@@ -1,21 +1,19 @@
-from utils.archive_scraper import get_archived_url
 import argparse
 import sys
 import logging
+import asyncio
+from utils.email_checker import EmailChecker
 
 def main():
     """
-    Main function to handle URL archiving from command line
+    Main function to run the email checker
     """
-    # Example URL from Towards AI article about Gemma 3 + MistralOCR + RAG
-    example_url = "https://pub.towardsai.net/gemma-3-mistralocr-rag-just-revolutionized-agent-ocr-forever-e69d1f2a67e5"
-    
     parser = argparse.ArgumentParser(
-        description='Get archived URL from archive.ph',
-        epilog=f'Example: python main.py "{example_url}"'
+        description='Check for Medium emails and archive articles',
+        epilog='Example: python main.py --interval 300'
     )
-    parser.add_argument('url', nargs='?', default=example_url,
-                       help='URL to archive (default: Towards AI article)')
+    parser.add_argument('--interval', type=int, default=300,
+                       help='Time between checks in seconds (default: 300)')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Enable verbose debug output')
     
@@ -29,11 +27,14 @@ def main():
     )
     
     try:
-        logging.info(f"Getting archived URL for: {args.url}")
-        archived_url = get_archived_url(args.url)
-        print(archived_url)
+        logging.info("Starting Medium email checker...")
+        checker = EmailChecker()
+        asyncio.run(checker.run(check_interval=args.interval))
+    except KeyboardInterrupt:
+        logging.info("Shutting down gracefully...")
+        sys.exit(0)
     except Exception as e:
-        logging.error(f"Error during archiving: {str(e)}")
+        logging.error(f"Error during execution: {str(e)}")
         sys.exit(1)
 
 if __name__ == "__main__":
