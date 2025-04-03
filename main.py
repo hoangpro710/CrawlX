@@ -1,7 +1,9 @@
-import argparse
 import sys
 import logging
 import asyncio
+import signal
+import traceback
+import platform
 from utils.email_checker import EmailChecker
 
 # Configure root logger for detailed output
@@ -10,55 +12,96 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-async def async_main(args):
-    """
-    Async main function to run the email checker
-    """
+logger = logging.getLogger(__name__)
+
+async def shutdown(checker, signal=None):
+    """Cleanup function to handle graceful shutdown"""
+    if signal:
+        logger.info(f"Received exit signal {signal.name}...")
+    
     try:
-        logging.info("=== Starting Medium email checker ===")
-        logging.debug(f"Check interval: {args.interval} seconds")
-        logging.debug(f"Verbose mode: {args.verbose}")
+        # Stop the bot first
+        if checker:
+            await checker.stop()
         
-        checker = EmailChecker()
-        await checker.run(check_interval=args.interval)
-    except KeyboardInterrupt:
-        logging.info("=== Shutting down gracefully... ===")
+        # Wait for tasks to complete
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        
+        logger.info(f"Cancelling {len(tasks)} outstanding tasks")
+        await asyncio.gather(*tasks, return_exceptions=True)
+        
+        if hasattr(checker, 'email_processor'):
+            await checker.email_processor.shutdown()
+        
+        logger.info("Shutdown complete.")
     except Exception as e:
-        logging.error(f"=== Error during execution: {str(e)} ===")
+        logger.error(f"Error during shutdown: {str(e)}")
+        logger.debug(traceback.format_exc())
+
+async def async_main():
+    """
+    Async main function to run the bot
+    """
+    checker = None
+    try:
+        # Create the email checker
+        checker = EmailChecker()
+        
+        # Setup signal handlers based on platform
+        if platform.system() != 'Windows':
+            # Unix-like systems can use add_signal_handler
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(
+                    sig,
+                    lambda s=sig: asyncio.create_task(shutdown(checker, s))
+                )
+        else:
+            # Windows doesn't support add_signal_handler, use signal.signal instead
+            def signal_handler(sig, frame):
+                logger.info(f"Received signal {sig}")
+                asyncio.create_task(shutdown(checker, signal.Signals(sig)))
+            
+            signal.signal(signal.SIGINT, signal_handler)
+            signal.signal(signal.SIGTERM, signal_handler)
+        
+        print("\n=== Medium Article Archiver Bot ===")
+        print("Bot is starting... Use /run_now in Telegram to check emails")
+        print("Press Ctrl+C to stop the bot\n")
+        
+        # Run the bot
+        await checker.run_bot_only()
+        
+    except asyncio.CancelledError:
+        logger.info("Main task cancelled")
+    except Exception as e:
+        logger.error(f"Error during execution: {str(e)}")
+        logger.debug(traceback.format_exc())
         raise
+    finally:
+        if checker:
+            await shutdown(checker)
 
 def main():
     """
-    Main function to handle command line arguments and run the async main
+    Main function to start the bot
     """
-    parser = argparse.ArgumentParser(
-        description='Check for Medium emails and archive articles',
-        epilog='Example: python main.py --interval 300'
-    )
-    parser.add_argument('--interval', type=int, default=300,
-                       help='Time between checks in seconds (default: 300)')
-    parser.add_argument('--verbose', '-v', action='store_true', default=True,
-                       help='Enable verbose debug output (default: True)')
-    parser.add_argument('--debug-email', '-d', action='store_true', default=True,
-                       help='Print detailed email content for debugging (default: True)')
-    
-    args = parser.parse_args()
-    
-    print("\n=== Medium Article Archiver Debug Mode ===")
-    print(f"Check interval: {args.interval} seconds")
-    print(f"Verbose logging: {args.verbose}")
-    print(f"Email debugging: {args.debug_email}\n")
-    
     try:
+        # Set up the event loop policy for Windows
+        if platform.system() == 'Windows':
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        
         # Run the async main function
-        asyncio.run(async_main(args))
+        asyncio.run(async_main())
     except KeyboardInterrupt:
         print("\n=== Bot stopped by user ===")
-        logging.info("Shutting down gracefully...")
-        sys.exit(0)
     except Exception as e:
-        print(f"\n=== Fatal Error: {str(e)} ===")
-        logging.error(f"Error during execution: {str(e)}")
+        error_msg = str(e) if str(e) else "Unknown error occurred"
+        print(f"\n=== Fatal Error: {error_msg} ===")
+        logger.error(f"Error during execution: {error_msg}")
+        logger.debug(traceback.format_exc())
         sys.exit(1)
 
 if __name__ == "__main__":

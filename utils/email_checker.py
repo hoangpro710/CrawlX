@@ -5,7 +5,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from .email_processor import EmailProcessor
+from utils.email_processor import EmailProcessor
 
 # Load environment variables
 load_dotenv()
@@ -24,12 +24,14 @@ class EmailChecker:
         self.imap_server = os.getenv('IMAP_SERVER', 'imap.gmail.com')
         self.imap_port = int(os.getenv('IMAP_PORT', '993'))
         
-        if not all([self.email, self.password]):
+        if not self.email or not self.password:
             raise ValueError("EMAIL_ADDRESS and EMAIL_PASSWORD must be set in .env file")
         
-        self.email_processor = EmailProcessor()
+        # Initialize email processor with reference to this checker
+        self.email_processor = EmailProcessor(email_checker=self)
         self.processed_emails = set()
         self.first_check = True
+        self._stop_event = asyncio.Event()
 
     async def connect_to_imap(self):
         """Connect to the IMAP server"""
@@ -104,116 +106,115 @@ class EmailChecker:
             raise
 
     async def process_new_emails(self):
-        """Process all new emails"""
+        """Process new emails when /run_now is called"""
         try:
-            message_ids = await self.get_new_emails()
-            
-            for msg_id in message_ids:
-                if msg_id in self.processed_emails:
-                    continue
-                    
-                try:
-                    _, msg_data = self.imap.fetch(msg_id, '(RFC822)')
-                    email_body = msg_data[0][1]
-                    
-                    # Process the email
-                    await self.email_processor.process_email(email_body)
-                    
-                    # Mark as processed
-                    self.processed_emails.add(msg_id)
-                    
-                    # Mark email as read
-                    self.imap.store(msg_id, '+FLAGS', '(\Seen)')
-                    logging.info(f"Marked email {msg_id} as read")
-                    
-                except Exception as e:
-                    error_msg = f"Error processing email {msg_id}: {str(e)}"
-                    logging.error(error_msg)
-                    await self.email_processor.application.bot.send_message(
-                        chat_id=self.email_processor.telegram_chat_id,
-                        text=f"❌ {error_msg}",
-                        parse_mode='HTML'
-                    )
-                    continue
-                    
-        except Exception as e:
-            logging.error(f"Error in process_new_emails: {str(e)}")
-            raise
-
-    async def run(self, check_interval=300):
-        """
-        Run the email checker continuously
-        
-        Args:
-            check_interval (int): Time between checks in seconds (default: 5 minutes)
-        """
-        try:
-            # Initialize the bot
-            await self.email_processor.initialize()
-            
-            # Store email checker in application context
-            self.email_processor.application.email_checker = self
-            
             # Connect to email server
-            await self.connect_to_imap()
-            
-            # Start bot polling in the background
-            polling_task = asyncio.create_task(self.email_processor.run_polling())
-            
-            try:
-                # Do first check immediately
-                await self.process_new_emails()
-                
-                while True:
-                    try:
-                        # Send status message about next check
-                        next_check = datetime.now() + timedelta(seconds=check_interval)
-                        await self.email_processor.application.bot.send_message(
-                            chat_id=self.email_processor.telegram_chat_id,
-                            text=f"⏳ Next check in {check_interval//60} minutes (at {next_check.strftime('%H:%M:%S')})",
-                            parse_mode='HTML'
-                        )
-                        
-                        # Wait for next check
-                        await asyncio.sleep(check_interval)
-                        
-                        # Perform the check
-                        await self.process_new_emails()
-                        
-                    except Exception as e:
-                        error_msg = f"Error in main loop: {str(e)}"
-                        logging.error(error_msg)
-                        await self.email_processor.application.bot.send_message(
-                            chat_id=self.email_processor.telegram_chat_id,
-                            text=f"❌ {error_msg}\nRetrying in 1 minute...",
-                            parse_mode='HTML'
-                        )
-                        await asyncio.sleep(60)  # Wait a minute before retrying
-                        
-            except asyncio.CancelledError:
-                logging.info("Shutting down email checker...")
-                await self.email_processor.application.bot.send_message(
-                    chat_id=self.email_processor.telegram_chat_id,
-                    text="🛑 Bot is shutting down...",
-                    parse_mode='HTML'
-                )
-            finally:
-                # Clean up
-                await self.email_processor.shutdown()
-                try:
-                    self.imap.logout()
-                except:
-                    pass
-                    
-        except Exception as e:
-            error_msg = f"Fatal error: {str(e)}"
-            logging.error(error_msg)
             await self.email_processor.application.bot.send_message(
                 chat_id=self.email_processor.telegram_chat_id,
-                text=f"❌ {error_msg}",
+                text="🔄 Connecting to email server...",
                 parse_mode='HTML'
             )
+            
+            await self.connect_to_imap()
+            
+            # Search for Medium emails
+            emails = await self.get_new_emails()
+            if not emails:
+                await self.email_processor.application.bot.send_message(
+                    chat_id=self.email_processor.telegram_chat_id,
+                    text="ℹ️ No new Medium emails found",
+                    parse_mode='HTML'
+                )
+                return
+            
+            # Process each email
+            for email_id in emails:
+                email_data = await self.fetch_email(email_id)
+                await self.email_processor.process_email(email_data)
+                await self.mark_as_read(email_id)
+            
+        except Exception as e:
+            logging.error(f"Error processing emails: {str(e)}")
+            await self.email_processor.application.bot.send_message(
+                chat_id=self.email_processor.telegram_chat_id,
+                text=f"❌ Error checking emails: {str(e)}",
+                parse_mode='HTML'
+            )
+        finally:
+            # Always disconnect from email server
+            await self.disconnect()
+
+    async def run_bot_only(self):
+        """Run only the Telegram bot without interval checking"""
+        try:
+            # Initialize the email processor
+            await self.email_processor.initialize()
+            
+            # Send startup message
+            await self.email_processor.application.bot.send_message(
+                chat_id=self.email_processor.telegram_chat_id,
+                text="🤖 Bot is running!\nUse /run_now to check for new Medium articles\nUse /help to see all commands",
+                parse_mode='HTML'
+            )
+            
+            # Start the application
+            await self.email_processor.application.initialize()
+            await self.email_processor.application.start()
+            await self.email_processor.application.updater.start_polling()
+            
+            # Keep the bot running until stop event is set
+            await self._stop_event.wait()
+            
+            # Stop the bot
+            await self.email_processor.application.updater.stop()
+            await self.email_processor.application.stop()
+            
+        except Exception as e:
+            logging.error(f"Error running bot: {str(e)}")
             raise
+        finally:
+            # Don't try to shutdown here - it will be handled by the main process
+            pass
+
+    async def stop(self):
+        """Stop the bot"""
+        self._stop_event.set()
+
+    async def disconnect(self):
+        """Disconnect from IMAP server"""
+        try:
+            if hasattr(self, 'imap'):
+                self.imap.close()
+                self.imap.logout()
+        except Exception as e:
+            logging.error(f"Error disconnecting from IMAP: {str(e)}")
+
+    async def fetch_email(self, email_id):
+        """Fetch email data by ID"""
+        try:
+            _, msg_data = self.imap.fetch(email_id, '(RFC822)')
+            return msg_data[0][1]
+        except Exception as e:
+            logging.error(f"Error fetching email {email_id}: {str(e)}")
+            raise
+
+    async def mark_as_read(self, email_id):
+        """Mark email as read"""
+        try:
+            self.imap.store(email_id, '+FLAGS', '(\Seen)')
+            logging.info(f"Marked email {email_id} as read")
+        except Exception as e:
+            logging.error(f"Error marking email {email_id} as read: {str(e)}")
+            raise
+
+    async def initialize(self):
+        """Initialize the email processor"""
+        await self.email_processor.initialize()
+
+    async def shutdown(self):
+        """Shutdown the email processor"""
+        if hasattr(self, 'email_processor'):
+            await self.email_processor.shutdown()
 
 async def main():
     """Main function to run the email checker"""

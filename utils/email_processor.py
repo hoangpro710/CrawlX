@@ -18,12 +18,15 @@ logging.basicConfig(level=logging.INFO,
                    format='%(asctime)s - %(levelname)s - %(message)s')
 
 class EmailProcessor:
-    def __init__(self):
+    def __init__(self, email_checker=None):
         """Initialize the EmailProcessor with Telegram bot token"""
         self.telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
         if not self.telegram_bot_token or not self.telegram_chat_id:
             raise ValueError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set in .env file")
+        
+        # Store reference to EmailChecker
+        self.email_checker = email_checker
         
         # Initialize the application
         self.application = Application.builder().token(self.telegram_bot_token).build()
@@ -35,8 +38,10 @@ class EmailProcessor:
 
     async def initialize(self):
         """Initialize the bot application"""
+        # Don't start the application here, just initialize it
         await self.application.initialize()
-        await self.application.start()
+        
+        # Send startup message
         await self.application.bot.send_message(
             chat_id=self.telegram_chat_id,
             text="🚀 Bot has started! Use /help to see available commands.",
@@ -45,8 +50,13 @@ class EmailProcessor:
 
     async def shutdown(self):
         """Shutdown the bot application"""
-        await self.application.stop()
-        await self.application.shutdown()
+        try:
+            if hasattr(self, 'application'):
+                if self.application.running:
+                    await self.application.stop()
+                await self.application.shutdown()
+        except Exception as e:
+            logging.error(f"Error during shutdown: {str(e)}")
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle the /start command"""
@@ -96,9 +106,8 @@ class EmailProcessor:
                 parse_mode='HTML'
             )
             
-            # Get the email checker instance from context
-            email_checker = context.application.email_checker
-            if not email_checker:
+            # Check if email_checker is available
+            if not self.email_checker:
                 await status_message.edit_text(
                     "❌ Error: Email checker not initialized. Please wait a moment and try again.",
                     parse_mode='HTML'
@@ -106,7 +115,7 @@ class EmailProcessor:
                 return
             
             # Process new emails
-            await email_checker.process_new_emails()
+            await self.email_checker.process_new_emails()
             
             # Update status message
             await status_message.edit_text(
@@ -121,33 +130,28 @@ class EmailProcessor:
 
     def extract_urls_from_html(self, html_content: str) -> list:
         """Extract Medium article URLs from HTML content"""
-        urls = []
+        urls = set()  # Use set to automatically handle duplicates
         try:
             from bs4 import BeautifulSoup
             soup = BeautifulSoup(html_content, 'html.parser')
             
-            # Get all links from href attributes
+            # Get URLs from href attributes
             for link in soup.find_all('a', href=True):
                 url = link['href'].strip()
-                
-                # Match only URLs in format: https://medium.com/@username/article-slug
                 if re.match(r'https://medium\.com/@[\w.-]+/[^?]+', url):
-                    # Remove any query parameters
-                    clean_url = url.split('?')[0]
-                    if clean_url not in urls:
-                        urls.append(clean_url)
+                    urls.add(url.split('?')[0])  # Remove query parameters
             
-            print(f"\nFound {len(urls)} Medium article URLs:")
-            for idx, url in enumerate(urls, 1):
-                print(f"{idx}. {url}")
-                
+            # Also check for URLs in the raw HTML
+            text_urls = re.findall(r'https://medium\.com/@[\w.-]+/[^?\s<>"]+', html_content)
+            urls.update(url.split('?')[0] for url in text_urls)
+            
         except Exception as e:
-            print(f"Error extracting URLs from HTML: {str(e)}")
+            print(f"Error parsing HTML: {str(e)}")
             # Fallback to regex-based extraction
-            all_urls = re.findall(r'https://medium\.com/@[\w.-]+/[^?\s<>"]+', html_content)
-            urls = [url.split('?')[0] for url in all_urls if url not in urls]
-            
-        return urls
+            text_urls = re.findall(r'https://medium\.com/@[\w.-]+/[^?\s<>"]+', html_content)
+            urls.update(url.split('?')[0] for url in text_urls)
+        
+        return list(urls)
 
     def get_email_body(self, email_message) -> tuple:
         """Extract email body and URLs from HTML content"""
@@ -326,57 +330,51 @@ class EmailProcessor:
     async def process_email(self, email_data: bytes) -> None:
         """Process the email and archive URLs"""
         try:
-            print("\n" + "="*50)
-            print("Starting Email Processing")
-            print("="*50)
-            
             # Parse the email
             email_message = message_from_bytes(email_data)
             
-            # Get URLs from email
-            print("\n=== Extracting URLs ===")
-            _, all_urls = self.get_email_body(email_message)
+            # Find HTML content
+            html_content = ""
+            for part in email_message.walk():
+                if part.get_content_type() == "text/html":
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        if isinstance(payload, bytes):
+                            html_content = payload.decode('utf-8', errors='ignore')
+                        else:
+                            html_content = str(payload)
+                        break
             
-            # Process Medium URLs
+            if not html_content:
+                raise ValueError("No HTML content found in email")
+            
+            # Extract URLs
+            urls = self.extract_urls_from_html(html_content)
+            if not urls:
+                raise ValueError("No Medium article URLs found")
+            
+            # Process URLs
             processed_articles = []
-            for url in all_urls:
+            for url in urls:
                 try:
-                    # Only process URLs in the correct format
-                    if re.match(r'https://medium\.com/@[\w.-]+/[^?]+', url):
-                        clean_url = url.split('?')[0]  # Remove query parameters
-                        print(f"\n=== Processing URL: {clean_url} ===")
-                        archived_url = get_archived_url(clean_url)
-                        processed_articles.append({
-                            'original_url': clean_url,
-                            'archived_url': archived_url
-                        })
+                    archived_url = get_archived_url(url)
+                    processed_articles.append({
+                        'original_url': url,
+                        'archived_url': archived_url
+                    })
                 except Exception as e:
-                    print(f"Error processing URL {url}: {str(e)}")
-                    logging.warning(f"Failed to process URL {url}: {str(e)}")
+                    print(f"Error archiving {url}: {str(e)}")
+                    continue
             
             if not processed_articles:
-                raise ValueError("No Medium articles were found to archive")
+                raise ValueError("No articles were successfully archived")
             
-            # Prepare notification message
-            message_parts = [
-                "📚 New Medium Articles Archived!\n",
-                "📥 Archived Articles:"
-            ]
-            
+            # Send short notification
+            message = "📚 Archived Medium Articles:\n\n"
             for idx, article in enumerate(processed_articles, 1):
-                message_parts.append(
-                    f"\n{idx}. Original: {article['original_url']}"
-                    f"\n   Archived: {article['archived_url']}"
-                )
+                message += f"{idx}. {article['original_url']}\n"
+                message += f"   → {article['archived_url']}\n\n"
             
-            message_parts.extend([
-                f"\n\n⏰ Processed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                "\nUse /help to see available commands"
-            ])
-            
-            message = '\n'.join(message_parts)
-            
-            print("\n=== Sending Notification ===")
             # Send Telegram notification
             await self.application.bot.send_message(
                 chat_id=self.telegram_chat_id,
@@ -384,23 +382,21 @@ class EmailProcessor:
                 parse_mode='HTML'
             )
             
-            print("\n=== Processing Complete ===")
-            logging.info(f"Successfully archived {len(processed_articles)} articles")
+            print(f"Successfully archived {len(processed_articles)} articles")
             
         except Exception as e:
             error_message = f"Error processing email: {str(e)}"
-            logging.error(error_message)
-            print(f"\n=== Processing Error ===")
-            print(f"Error: {str(e)}")
-            print(f"Error type: {type(e)}")
-            print("=== End Error ===\n")
+            print(error_message)
             await self.application.bot.send_message(
                 chat_id=self.telegram_chat_id,
                 text=f"❌ {error_message}",
                 parse_mode='HTML'
             )
-            raise
 
     async def run_polling(self):
         """Run the bot polling in the background"""
-        await self.application.run_polling(drop_pending_updates=True) 
+        try:
+            await self.application.run_polling(allowed_updates=["message"])
+        except Exception as e:
+            logging.error(f"Error in polling: {str(e)}")
+            raise 
